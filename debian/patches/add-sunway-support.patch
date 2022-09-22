@@ -1,0 +1,973 @@
+Description: Add support for sunway
+Author: Miao Changwei <miaochangwei@uniontech.com>
+
+---
+Last-Update: 2022-04-07
+
+--- libffi-3.4.2.orig/Makefile.am
++++ libffi-3.4.2/Makefile.am
+@@ -61,6 +61,7 @@ noinst_HEADERS = src/aarch64/ffitarget.h
+ 	src/s390/ffitarget.h src/s390/internal.h src/sh/ffitarget.h	\
+ 	src/sh64/ffitarget.h src/sparc/ffitarget.h			\
+ 	src/sparc/internal.h src/tile/ffitarget.h src/vax/ffitarget.h	\
++	src/sw64/ffitarget.h src/sw64/internal.h			\
+ 	src/x86/ffitarget.h src/x86/internal.h src/x86/internal64.h	\
+ 	src/x86/asmnames.h src/xtensa/ffitarget.h src/dlmalloc.c	\
+ 	src/kvx/ffitarget.h
+@@ -89,6 +90,7 @@ EXTRA_libffi_la_SOURCES = src/aarch64/ff
+ 	src/s390/sysv.S src/sh/ffi.c src/sh/sysv.S src/sh64/ffi.c	\
+ 	src/sh64/sysv.S src/sparc/ffi.c src/sparc/ffi64.c		\
+ 	src/sparc/v8.S src/sparc/v9.S src/tile/ffi.c src/tile/tile.S	\
++	src/sw64/ffi.c src/sw64/sysv.S					\
+ 	src/vax/ffi.c src/vax/elfbsd.S src/x86/ffi.c src/x86/sysv.S	\
+ 	src/x86/ffiw64.c src/x86/win64.S src/x86/ffi64.c		\
+ 	src/x86/unix64.S src/x86/sysv_intel.S src/x86/win64_intel.S	\
+--- libffi-3.4.2.orig/config.guess
++++ libffi-3.4.2/config.guess
+@@ -939,6 +939,10 @@ EOF
+ 	if test "$?" = 0 ; then LIBC=gnulibc1 ; fi
+ 	echo "$UNAME_MACHINE"-unknown-linux-"$LIBC"
+ 	exit ;;
++    sw_64:Linux:*:* | sw64:Linux:*:*)
++	UNAME_MACHINE=sw_64
++	echo "$UNAME_MACHINE"-unknown-linux-"$LIBC"
++	exit ;;
+     arc:Linux:*:* | arceb:Linux:*:*)
+ 	echo "$UNAME_MACHINE"-unknown-linux-"$LIBC"
+ 	exit ;;
+--- libffi-3.4.2.orig/config.sub
++++ libffi-3.4.2/config.sub
+@@ -1239,7 +1239,7 @@ case $cpu-$vendor in
+ 			| sparc | sparc64 | sparc64b | sparc64v | sparc86x | sparclet \
+ 			| sparclite \
+ 			| sparcv8 | sparcv9 | sparcv9b | sparcv9v | sv1 | sx* \
+-			| spu \
++			| spu | sw_64 \
+ 			| tahoe \
+ 			| tic30 | tic4x | tic54x | tic55x | tic6x | tic80 \
+ 			| tron \
+--- libffi-3.4.2.orig/configure.host
++++ libffi-3.4.2/configure.host
+@@ -247,6 +247,13 @@ case "${host}" in
+ 	SOURCES="ffi.c ffi64.c v8.S v9.S"
+ 	;;
+ 
++  sw_64*-*-* | sw64*-*-*)
++	TARGET=SW64; TARGETDIR=sw64;
++	# Support 128-bit long double, changeable via command-line switch.
++	HAVE_LONG_DOUBLE='defined(__LONG_DOUBLE_128__)'
++	SOURCES="ffi.c sysv.S"
++	;;
++
+   tile*-*)
+         TARGET=TILE; TARGETDIR=tile
+ 	SOURCES="ffi.c tile.S"
+--- /dev/null
++++ libffi-3.4.2/src/sw64/ffi.c
+@@ -0,0 +1,517 @@
++/* -----------------------------------------------------------------------
++   ffi.c - Copyright (c) 2012  Anthony Green
++	   Copyright (c) 1998, 2001, 2007, 2008  Red Hat, Inc.
++	   Copyright (c) 2021, UnionTech Software Technology Co., Ltd.
++
++   Sunway Foreign Function Interface
++
++   Permission is hereby granted, free of charge, to any person obtaining
++   a copy of this software and associated documentation files (the
++   ``Software''), to deal in the Software without restriction, including
++   without limitation the rights to use, copy, modify, merge, publish,
++   distribute, sublicense, and/or sell copies of the Software, and to
++   permit persons to whom the Software is furnished to do so, subject to
++   the following conditions:
++
++   The above copyright notice and this permission notice shall be included
++   in all copies or substantial portions of the Software.
++
++   THE SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY OF ANY KIND,
++   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++   NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++   HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
++   WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++   DEALINGS IN THE SOFTWARE.
++   ----------------------------------------------------------------------- */
++
++#include <ffi.h>
++#include <ffi_common.h>
++#include <stdlib.h>
++#include "internal.h"
++
++/* Force FFI_TYPE_LONGDOUBLE to be different than FFI_TYPE_DOUBLE;
++   all further uses in this file will refer to the 128-bit type.  */
++#if defined(__LONG_DOUBLE_128__)
++# if FFI_TYPE_LONGDOUBLE != 4
++#  error FFI_TYPE_LONGDOUBLE out of date
++# endif
++#else
++# undef FFI_TYPE_LONGDOUBLE
++# define FFI_TYPE_LONGDOUBLE 4
++#endif
++
++extern void ffi_call_SYSV(void *stack, void *frame, unsigned flags,
++			 void *raddr, void (*fn)(void), void *closure)
++	FFI_HIDDEN;
++extern void ffi_closure_SYSV(void) FFI_HIDDEN;
++extern void ffi_go_closure_SYSV(void) FFI_HIDDEN;
++
++/* Promote a float value to its in-register double representation.
++   Unlike actually casting to double, this does not trap on NaN.  */
++static inline UINT64 lds(void *ptr)
++{
++  UINT64 ret;
++  asm("flds %0,%1" : "=f"(ret) : "m"(*(UINT32 *)ptr));
++  return ret;
++}
++
++/* And the reverse.  */
++static inline void sts(void *ptr, UINT64 val)
++{
++  asm("fsts %1,%0" : "=m"(*(UINT32 *)ptr) : "f"(val));
++}
++
++ffi_status FFI_HIDDEN
++ffi_prep_cif_machdep(ffi_cif *cif)
++{
++  size_t bytes = 0;
++  int flags, i, avn;
++  ffi_type *rtype, *itype;
++
++  if (cif->abi != FFI_SYSV)
++    return FFI_BAD_ABI;
++
++  /* Compute the size of the argument area.  */
++  for (i = 0, avn = cif->nargs; i < avn; i++)
++    {
++      itype = cif->arg_types[i];
++      switch (itype->type)
++	{
++	case FFI_TYPE_INT:
++	case FFI_TYPE_SINT8:
++	case FFI_TYPE_UINT8:
++	case FFI_TYPE_SINT16:
++	case FFI_TYPE_UINT16:
++	case FFI_TYPE_SINT32:
++	case FFI_TYPE_UINT32:
++	case FFI_TYPE_SINT64:
++	case FFI_TYPE_UINT64:
++	case FFI_TYPE_POINTER:
++	case FFI_TYPE_FLOAT:
++	case FFI_TYPE_DOUBLE:
++	case FFI_TYPE_LONGDOUBLE:
++	  /* All take one 8 byte slot.  */
++	  bytes += 8;
++	  break;
++
++	case FFI_TYPE_VOID:
++	case FFI_TYPE_STRUCT:
++	  /* Passed by value in N slots.  */
++	  bytes += FFI_ALIGN(itype->size, FFI_SIZEOF_ARG);
++	  break;
++
++	case FFI_TYPE_COMPLEX:
++	  /* _Complex long double passed by reference; others in 2 slots.  */
++	  if (itype->elements[0]->type == FFI_TYPE_LONGDOUBLE)
++	    bytes += 8;
++	  else
++	    bytes += 16;
++	  break;
++
++	default:
++	  abort();
++	}
++    }
++
++  /* Set the return type flag */
++  rtype = cif->rtype;
++  switch (rtype->type)
++    {
++    case FFI_TYPE_VOID:
++      flags = SW64_FLAGS(SW64_ST_VOID, SW64_LD_VOID);
++      break;
++    case FFI_TYPE_INT:
++    case FFI_TYPE_UINT32:
++    case FFI_TYPE_SINT32:
++      flags = SW64_FLAGS(SW64_ST_INT, SW64_LD_INT32);
++      break;
++    case FFI_TYPE_FLOAT:
++      flags = SW64_FLAGS(SW64_ST_FLOAT, SW64_LD_FLOAT);
++      break;
++    case FFI_TYPE_DOUBLE:
++      flags = SW64_FLAGS(SW64_ST_DOUBLE, SW64_LD_DOUBLE);
++      break;
++    case FFI_TYPE_UINT8:
++      flags = SW64_FLAGS(SW64_ST_INT, SW64_LD_UINT8);
++      break;
++    case FFI_TYPE_SINT8:
++      flags = SW64_FLAGS(SW64_ST_INT, SW64_LD_SINT8);
++      break;
++    case FFI_TYPE_UINT16:
++      flags = SW64_FLAGS(SW64_ST_INT, SW64_LD_UINT16);
++      break;
++    case FFI_TYPE_SINT16:
++      flags = SW64_FLAGS(SW64_ST_INT, SW64_LD_SINT16);
++      break;
++    case FFI_TYPE_UINT64:
++    case FFI_TYPE_SINT64:
++    case FFI_TYPE_POINTER:
++      flags = SW64_FLAGS(SW64_ST_INT, SW64_LD_INT64);
++      break;
++    case FFI_TYPE_LONGDOUBLE:
++    case FFI_TYPE_STRUCT:
++      /* Passed in memory, with a hidden pointer.  */
++      flags = SW64_RET_IN_MEM;
++      break;
++    case FFI_TYPE_COMPLEX:
++      itype = rtype->elements[0];
++      switch (itype->type)
++	{
++	case FFI_TYPE_FLOAT:
++	  flags = SW64_FLAGS(SW64_ST_CPLXF, SW64_LD_CPLXF);
++	  break;
++	case FFI_TYPE_DOUBLE:
++	  flags = SW64_FLAGS(SW64_ST_CPLXD, SW64_LD_CPLXD);
++	  break;
++	default:
++	  if (rtype->size <= 8)
++	    flags = SW64_FLAGS(SW64_ST_INT, SW64_LD_INT64);
++	  else
++	    flags = SW64_RET_IN_MEM;
++	  break;
++	}
++      break;
++    default:
++      abort();
++    }
++  cif->flags = flags;
++
++  /* Include the hidden structure pointer in args requirement.  */
++  if (flags == SW64_RET_IN_MEM)
++    bytes += 8;
++  /* Minimum size is 6 slots, so that ffi_call_SYSV can pop them.  */
++  if (bytes < 6*8)
++    bytes = 6*8;
++  cif->bytes = bytes;
++
++  return FFI_OK;
++}
++
++static unsigned long
++extend_basic_type(void *valp, int type, int argn)
++{
++  switch (type)
++    {
++    case FFI_TYPE_SINT8:
++      return *(SINT8 *)valp;
++    case FFI_TYPE_UINT8:
++      return *(UINT8 *)valp;
++    case FFI_TYPE_SINT16:
++      return *(SINT16 *)valp;
++    case FFI_TYPE_UINT16:
++      return *(UINT16 *)valp;
++
++    case FFI_TYPE_FLOAT:
++      if (argn < 6)
++	return lds(valp);
++      /* FALLTHRU */
++
++    case FFI_TYPE_INT:
++    case FFI_TYPE_SINT32:
++    case FFI_TYPE_UINT32:
++      /* Note that unsigned 32-bit quantities are sign extended.  */
++      return *(SINT32 *)valp;
++
++    case FFI_TYPE_SINT64:
++    case FFI_TYPE_UINT64:
++    case FFI_TYPE_POINTER:
++    case FFI_TYPE_DOUBLE:
++      return *(UINT64 *)valp;
++
++    default:
++      abort();
++    }
++}
++
++static void
++ffi_call_int (ffi_cif *cif, void (*fn)(void), void *rvalue,
++	      void **avalue, void *closure)
++{
++  unsigned long *argp;
++  long i, avn, argn, flags = cif->flags;
++  ffi_type **arg_types;
++  void *frame;
++
++  /* If the return value is a struct and we don't have a return
++     value address then we need to make one.  */
++  if (rvalue == NULL && flags == SW64_RET_IN_MEM)
++    rvalue = alloca(cif->rtype->size);
++
++  /* Allocate the space for the arguments, plus 4 words of temp
++     space for ffi_call_SYSV.  */
++  argp = frame = alloca(cif->bytes + 4*FFI_SIZEOF_ARG);
++  frame += cif->bytes;
++
++  argn = 0;
++  if (flags == SW64_RET_IN_MEM)
++    argp[argn++] = (unsigned long)rvalue;
++
++  avn = cif->nargs;
++  arg_types = cif->arg_types;
++
++  for (i = 0, avn = cif->nargs; i < avn; i++)
++    {
++      ffi_type *ty = arg_types[i];
++      void *valp = avalue[i];
++      int type = ty->type;
++      size_t size;
++
++      switch (type)
++	{
++	case FFI_TYPE_INT:
++	case FFI_TYPE_SINT8:
++	case FFI_TYPE_UINT8:
++	case FFI_TYPE_SINT16:
++	case FFI_TYPE_UINT16:
++	case FFI_TYPE_SINT32:
++	case FFI_TYPE_UINT32:
++	case FFI_TYPE_SINT64:
++	case FFI_TYPE_UINT64:
++	case FFI_TYPE_POINTER:
++	case FFI_TYPE_FLOAT:
++	case FFI_TYPE_DOUBLE:
++	  argp[argn] = extend_basic_type(valp, type, argn);
++	  argn++;
++	  break;
++
++	case FFI_TYPE_LONGDOUBLE:
++	by_reference:
++	  /* Note that 128-bit long double is passed by reference.  */
++	  argp[argn++] = (unsigned long)valp;
++	  break;
++
++	case FFI_TYPE_VOID:
++	case FFI_TYPE_STRUCT:
++	  size = ty->size;
++	  memcpy(argp + argn, valp, size);
++	  argn += FFI_ALIGN(size, FFI_SIZEOF_ARG) / FFI_SIZEOF_ARG;
++	  break;
++
++	case FFI_TYPE_COMPLEX:
++	  type = ty->elements[0]->type;
++	  if (type == FFI_TYPE_LONGDOUBLE)
++	    goto by_reference;
++
++	  /* Most complex types passed as two separate arguments.  */
++	  size = ty->elements[0]->size;
++	  argp[argn] = extend_basic_type(valp, type, argn);
++	  argp[argn + 1] = extend_basic_type(valp + size, type, argn + 1);
++	  argn += 2;
++	  break;
++
++	default:
++	  abort();
++	}
++    }
++
++  flags = (flags >> SW64_ST_SHIFT) & 0xff;
++  ffi_call_SYSV(argp, frame, flags, rvalue, fn, closure);
++}
++
++void
++ffi_call (ffi_cif *cif, void (*fn)(void), void *rvalue, void **avalue)
++{
++  ffi_call_int(cif, fn, rvalue, avalue, NULL);
++}
++
++void
++ffi_call_go (ffi_cif *cif, void (*fn)(void), void *rvalue,
++	     void **avalue, void *closure)
++{
++  ffi_call_int(cif, fn, rvalue, avalue, closure);
++}
++
++ffi_status
++ffi_prep_closure_loc (ffi_closure* closure,
++		      ffi_cif* cif,
++		      void (*fun)(ffi_cif*, void*, void**, void*),
++		      void *user_data,
++		      void *codeloc)
++{
++  unsigned int *tramp;
++
++  if (cif->abi != FFI_SYSV)
++    return FFI_BAD_ABI;
++
++  tramp = (unsigned int *) &closure->tramp[0];
++  tramp[0] = 0x43fb0741;	/* mov $27,$1		*/
++  tramp[1] = 0x8f7b0010;	/* ldl $27,16($27)	*/
++  tramp[2] = 0x0ffb0000;	/* jmp $31,($27),0	*/
++  tramp[3] = 0x43ff075f;	/* nop			*/
++  *(void **) &tramp[4] = ffi_closure_SYSV;
++
++  closure->cif = cif;
++  closure->fun = fun;
++  closure->user_data = user_data;
++
++  /* Flush the Icache. 0x86 is HMC_imb <asm/hmcall.h>.  */
++  asm volatile ("sys_call 0x86" : : : "memory");
++
++  return FFI_OK;
++}
++
++ffi_status
++ffi_prep_go_closure (ffi_go_closure* closure,
++		     ffi_cif* cif,
++		     void (*fun)(ffi_cif*, void*, void**, void*))
++{
++  if (cif->abi != FFI_SYSV)
++    return FFI_BAD_ABI;
++
++  closure->tramp = (void *)ffi_go_closure_SYSV;
++  closure->cif = cif;
++  closure->fun = fun;
++
++  return FFI_OK;
++}
++
++long FFI_HIDDEN
++ffi_closure_SYSV_inner (ffi_cif *cif,
++		       void (*fun)(ffi_cif*, void*, void**, void*),
++		       void *user_data,
++		       void *rvalue, unsigned long *argp)
++{
++  void **avalue;
++  ffi_type **arg_types;
++  long i, avn, argn, flags;
++
++  avalue = alloca(cif->nargs * sizeof(void *));
++  flags = cif->flags;
++  argn = 0;
++
++  /* Copy the caller's structure return address to that the closure
++     returns the data directly to the caller.  */
++  if (flags == SW64_RET_IN_MEM)
++    {
++      rvalue = (void *) argp[0];
++      argn = 1;
++    }
++
++  arg_types = cif->arg_types;
++
++  /* Grab the addresses of the arguments from the stack frame.  */
++  for (i = 0, avn = cif->nargs; i < avn; i++)
++    {
++      ffi_type *ty = arg_types[i];
++      int type = ty->type;
++      void *valp = &argp[argn];
++      size_t size;
++
++      switch (type)
++	{
++	case FFI_TYPE_INT:
++	case FFI_TYPE_SINT8:
++	case FFI_TYPE_UINT8:
++	case FFI_TYPE_SINT16:
++	case FFI_TYPE_UINT16:
++	case FFI_TYPE_SINT32:
++	case FFI_TYPE_UINT32:
++	case FFI_TYPE_SINT64:
++	case FFI_TYPE_UINT64:
++	case FFI_TYPE_POINTER:
++	  argn += 1;
++	  break;
++
++	case FFI_TYPE_VOID:
++	case FFI_TYPE_STRUCT:
++	  size = ty->size;
++	  argn += FFI_ALIGN(size, FFI_SIZEOF_ARG) / FFI_SIZEOF_ARG;
++	  break;
++
++	case FFI_TYPE_FLOAT:
++	  /* Floats coming from registers need conversion from double
++	     back to float format.  */
++	  if (argn < 6)
++	    {
++	      valp = &argp[argn - 6];
++	      sts(valp, argp[argn - 6]);
++	    }
++	  argn += 1;
++	  break;
++
++	case FFI_TYPE_DOUBLE:
++	  if (argn < 6)
++	    valp = &argp[argn - 6];
++	  argn += 1;
++	  break;
++
++	case FFI_TYPE_LONGDOUBLE:
++	by_reference:
++	  /* 128-bit long double is passed by reference.  */
++	  valp = (void *)argp[argn];
++	  argn += 1;
++	  break;
++
++	case FFI_TYPE_COMPLEX:
++	  type = ty->elements[0]->type;
++	  switch (type)
++	    {
++	    case FFI_TYPE_SINT64:
++	    case FFI_TYPE_UINT64:
++	      /* Passed as separate arguments, but they wind up sequential.  */
++	      break;
++
++	    case FFI_TYPE_INT:
++	    case FFI_TYPE_SINT8:
++	    case FFI_TYPE_UINT8:
++	    case FFI_TYPE_SINT16:
++	    case FFI_TYPE_UINT16:
++	    case FFI_TYPE_SINT32:
++	    case FFI_TYPE_UINT32:
++	      /* Passed as separate arguments.  Disjoint, but there's room
++		 enough in one slot to hold the pair.  */
++	      size = ty->elements[0]->size;
++	      memcpy(valp + size, valp + 8, size);
++	      break;
++
++	    case FFI_TYPE_FLOAT:
++	      /* Passed as separate arguments.  Disjoint, and each piece
++		 may need conversion back to float.  */
++	      if (argn < 6)
++		{
++		  valp = &argp[argn - 6];
++		  sts(valp, argp[argn - 6]);
++		}
++	      if (argn + 1 < 6)
++		sts(valp + 4, argp[argn + 1 - 6]);
++	      else
++		*(UINT32 *)(valp + 4) = argp[argn + 1];
++	      break;
++
++	    case FFI_TYPE_DOUBLE:
++	      /* Passed as separate arguments.  Only disjoint if one part
++		 is in fp regs and the other is on the stack.  */
++	      if (argn < 5)
++		valp = &argp[argn - 6];
++	      else if (argn == 5)
++		{
++		  valp = alloca(16);
++		  ((UINT64 *)valp)[0] = argp[5 - 6];
++		  ((UINT64 *)valp)[1] = argp[6];
++		}
++	      break;
++
++	    case FFI_TYPE_LONGDOUBLE:
++	      goto by_reference;
++
++	    default:
++	      abort();
++	    }
++	  argn += 2;
++	  break;
++
++	default:
++	  abort ();
++	}
++
++      avalue[i] = valp;
++    }
++
++  /* Invoke the closure.  */
++  fun (cif, rvalue, avalue, user_data);
++
++  /* Tell ffi_closure_SYSV how to perform return type promotions.  */
++  return (flags >> SW64_LD_SHIFT) & 0xff;
++}
+--- /dev/null
++++ libffi-3.4.2/src/sw64/ffitarget.h
+@@ -0,0 +1,58 @@
++/* -----------------------------------------------------------------*-C-*-
++   ffitarget.h - Copyright (c) 2012  Anthony Green
++                 Copyright (c) 1996-2003  Red Hat, Inc.
++                 Copyright (c) 2021  UnionTech Software Technology Co., Ltd.
++   Target configuration macros for Sunway.
++
++   Permission is hereby granted, free of charge, to any person obtaining
++   a copy of this software and associated documentation files (the
++   ``Software''), to deal in the Software without restriction, including
++   without limitation the rights to use, copy, modify, merge, publish,
++   distribute, sublicense, and/or sell copies of the Software, and to
++   permit persons to whom the Software is furnished to do so, subject to
++   the following conditions:
++
++   The above copyright notice and this permission notice shall be included
++   in all copies or substantial portions of the Software.
++
++   THE SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY OF ANY KIND,
++   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++   NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++   HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
++   WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++   DEALINGS IN THE SOFTWARE.
++
++   ----------------------------------------------------------------------- */
++
++#ifndef LIBFFI_TARGET_H
++#define LIBFFI_TARGET_H
++
++#ifndef LIBFFI_H
++#error "Please do not include ffitarget.h directly into your source.  Use ffi.h instead."
++#endif
++
++#ifndef LIBFFI_ASM
++typedef unsigned long          ffi_arg;
++typedef signed long            ffi_sarg;
++
++typedef enum ffi_abi {
++  FFI_FIRST_ABI = 0,
++  FFI_SYSV,
++  FFI_LAST_ABI,
++  FFI_DEFAULT_ABI = FFI_SYSV
++} ffi_abi;
++#endif
++
++#define FFI_TARGET_SPECIFIC_STACK_SPACE_ALLOCATION
++#define FFI_TARGET_HAS_COMPLEX_TYPE
++
++/* ---- Definitions for closures ----------------------------------------- */
++
++#define FFI_CLOSURES 1
++#define FFI_GO_CLOSURES 1
++#define FFI_TRAMPOLINE_SIZE 24
++#define FFI_NATIVE_RAW_API 0
++
++#endif
+--- /dev/null
++++ libffi-3.4.2/src/sw64/internal.h
+@@ -0,0 +1,23 @@
++#define SW64_ST_VOID	0
++#define SW64_ST_INT	1
++#define SW64_ST_FLOAT	2
++#define SW64_ST_DOUBLE	3
++#define SW64_ST_CPLXF	4
++#define SW64_ST_CPLXD	5
++
++#define SW64_LD_VOID	0
++#define SW64_LD_INT64	1
++#define SW64_LD_INT32	2
++#define SW64_LD_UINT16	3
++#define SW64_LD_SINT16	4
++#define SW64_LD_UINT8	5
++#define SW64_LD_SINT8	6
++#define SW64_LD_FLOAT	7
++#define SW64_LD_DOUBLE	8
++#define SW64_LD_CPLXF	9
++#define SW64_LD_CPLXD	10
++
++#define SW64_ST_SHIFT		0
++#define SW64_LD_SHIFT		8
++#define SW64_RET_IN_MEM	0x10000
++#define SW64_FLAGS(S, L)	(((L) << SW64_LD_SHIFT) | (S))
+--- /dev/null
++++ libffi-3.4.2/src/sw64/sysv.S
+@@ -0,0 +1,283 @@
++/* -----------------------------------------------------------------------
++   sysv.S - Copyright (c) 1998, 2001, 2007, 2008, 2011, 2014 Red Hat
++            Copyright (c) 2021, UnionTech Software Technology Co., Ltd.
++
++   Sunway/SYSV Foreign Function Interface
++
++   Permission is hereby granted, free of charge, to any person obtaining
++   a copy of this software and associated documentation files (the
++   ``Software''), to deal in the Software without restriction, including
++   without limitation the rights to use, copy, modify, merge, publish,
++   distribute, sublicense, and/or sell copies of the Software, and to
++   permit persons to whom the Software is furnished to do so, subject to
++   the following conditions:
++
++   The above copyright notice and this permission notice shall be included
++   in all copies or substantial portions of the Software.
++
++   THE SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY OF ANY KIND,
++   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++   NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++   HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
++   WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++   DEALINGS IN THE SOFTWARE.
++   ----------------------------------------------------------------------- */
++
++#define LIBFFI_ASM
++#include <fficonfig.h>
++#include <ffi.h>
++#include <ffi_cfi.h>
++#include "internal.h"
++
++	.arch sw6
++	.text
++
++/* Aid in building a direct addressed jump table, 4 insns per entry.  */
++.macro E index
++	.align	4
++	.org	99b + \index * 16
++.endm
++
++/* ffi_call_SYSV (void *stack, void *frame, unsigned flags,
++		 void *raddr, void (*fnaddr)(void), void *closure)
++
++   Bit o trickiness here -- FRAME is the base of the stack frame
++   for this function.  This has been allocated by ffi_call.  We also
++   deallocate some of the stack that has been alloca'd.  */
++
++	.align	4
++	.globl	ffi_call_SYSV
++	.ent	ffi_call_SYSV
++	FFI_HIDDEN(ffi_call_SYSV)
++
++ffi_call_SYSV:
++	cfi_startproc
++	cfi_def_cfa($17, 32)
++	mov	$16, $30
++	stl	$26, 0($17)
++	stl	$15, 8($17)
++	mov	$17, $15
++	.prologue 0
++	cfi_def_cfa_register($15)
++	cfi_rel_offset($26, 0)
++	cfi_rel_offset($15, 8)
++
++	stl	$18, 16($17)		# save flags into frame
++	stl	$19, 24($17)		# save rvalue into frame
++	mov	$20, $27		# fn into place for call
++	mov	$21, $1			# closure into static chain
++
++	# Load up all of the (potential) argument registers.
++	ldl	$16, 0($30)
++	fldd    $f16, 0($30)
++	fldd    $f17, 8($30)
++	ldl	$17, 8($30)
++	fldd	$f18, 16($30)
++	ldl	$18, 16($30)
++	fldd	$f19, 24($30)
++	ldl	$19, 24($30)
++	fldd	$f20, 32($30)
++	ldl	$20, 32($30)
++	fldd	$f21, 40($30)
++	ldl	$21, 40($30)
++
++	# Deallocate the register argument area.
++	ldi	$30, 48($30)
++
++	call	$26, ($27), 0
++0:
++	ldih	$29, 0($26)		!gpdisp!1
++	ldl	$2, 24($15)		# reload rvalue
++	ldi	$29, 0($29)		!gpdisp!1
++	ldl	$3, 16($15)		# reload flags
++	ldi	$1, 99f-0b($26)
++	ldl	$26, 0($15)
++	ldl	$15, 8($15)
++	cfi_restore($26)
++	cfi_restore($15)
++	cfi_def_cfa($sp, 0)
++	seleq	$2, SW64_ST_VOID, $3, $3	# mash null rvalue to void
++	addl	$3, $3, $3
++	s8addl	$3, $1, $1		# 99f + stcode * 16
++	jmp	$31, ($1), $st_int
++
++	.align	4
++99:
++E SW64_ST_VOID
++	ret
++E SW64_ST_INT
++$st_int:
++	stl	$0, 0($2)
++	ret
++E SW64_ST_FLOAT
++	fsts	$f0, 0($2)
++	ret
++E SW64_ST_DOUBLE
++	fstd	$f0, 0($2)
++	ret
++E SW64_ST_CPLXF
++	fsts	$f0, 0($2)
++	fsts	$f1, 4($2)
++	ret
++E SW64_ST_CPLXD
++	fstd	$f0, 0($2)
++	fstd	$f1, 8($2)
++	ret
++
++	cfi_endproc
++	.end	ffi_call_SYSV
++
++/* ffi_closure_SYSV(...)
++
++   Receives the closure argument in $1.   */
++
++#define CLOSURE_FS	(16*8)
++
++	.align	4
++	.globl	ffi_go_closure_SYSV
++	.ent	ffi_go_closure_SYSV
++	FFI_HIDDEN(ffi_go_closure_SYSV)
++
++ffi_go_closure_SYSV:
++	cfi_startproc
++	ldgp	$29, 0($27)
++	subl	$30, CLOSURE_FS, $30
++	cfi_adjust_cfa_offset(CLOSURE_FS)
++	stl	$26, 0($30)
++	.prologue 1
++	cfi_rel_offset($26, 0)
++
++	stl	$16, 10*8($30)
++	stl	$17, 11*8($30)
++	stl	$18, 12*8($30)
++
++	ldl	$16, 8($1)			# load cif
++	ldl	$17, 16($1)			# load fun
++	mov	$1, $18				# closure is user_data
++	br	$do_closure
++
++	cfi_endproc
++	.end	ffi_go_closure_SYSV
++
++	.align	4
++	.globl	ffi_closure_SYSV
++	.ent	ffi_closure_SYSV
++	FFI_HIDDEN(ffi_closure_SYSV)
++
++ffi_closure_SYSV:
++	cfi_startproc
++	ldgp	$29, 0($27)
++	subl	$30, CLOSURE_FS, $30
++	cfi_adjust_cfa_offset(CLOSURE_FS)
++	stl	$26, 0($30)
++	.prologue 1
++	cfi_rel_offset($26, 0)
++
++	# Store all of the potential argument registers in va_list format.
++	stl	$16, 10*8($30)
++	stl	$17, 11*8($30)
++	stl	$18, 12*8($30)
++
++	ldl	$16, 24($1)			# load cif
++	ldl	$17, 32($1)			# load fun
++	ldl	$18, 40($1)			# load user_data
++
++$do_closure:
++	stl	$19, 13*8($30)
++	stl	$20, 14*8($30)
++	stl	$21, 15*8($30)
++	fstd	$f16, 4*8($30)
++	fstd	$f17, 5*8($30)
++	fstd	$f18, 6*8($30)
++	fstd	$f19, 7*8($30)
++	fstd	$f20, 8*8($30)
++	fstd	$f21, 9*8($30)
++
++	# Call ffi_closure_SYSV_inner to do the bulk of the work.
++	ldi	$19, 2*8($30)
++	ldi	$20, 10*8($30)
++	call	$26, ffi_closure_SYSV_inner
++0:
++	ldih	$29, 0($26)			!gpdisp!2
++	ldi	$2, 99f-0b($26)
++	s4addl	$0, 0, $1			# ldcode * 4
++	ldl	$0, 16($30)			# preload return value
++	s4addl	$1, $2, $1			# 99f + ldcode * 16
++	ldi	$29, 0($29)			!gpdisp!2
++	ldl	$26, 0($30)
++	cfi_restore($26)
++	jmp	$31, ($1), $load_32
++
++.macro epilogue
++	addl	$30, CLOSURE_FS, $30
++	cfi_adjust_cfa_offset(-CLOSURE_FS)
++	ret
++	.align	4
++	cfi_adjust_cfa_offset(CLOSURE_FS)
++.endm
++
++	.align 4
++99:
++E SW64_LD_VOID
++	epilogue
++
++E SW64_LD_INT64
++	epilogue
++
++E SW64_LD_INT32
++$load_32:
++	sextl	$0, $0
++	epilogue
++
++E SW64_LD_UINT16
++	zapnot	$0, 3, $0
++	epilogue
++
++E SW64_LD_SINT16
++#ifdef __sw_64_bwx__
++	sexth	$0, $0
++#else
++	sll	$0, 48, $0
++	sra	$0, 48, $0
++#endif
++	epilogue
++
++E SW64_LD_UINT8
++	and	$0, 0xff, $0
++	epilogue
++
++E SW64_LD_SINT8
++#ifdef __sw_64_bwx__
++	sextb	$0, $0
++#else
++	sll	$0, 56, $0
++	sra	$0, 56, $0
++#endif
++	epilogue
++
++E SW64_LD_FLOAT
++	flds	$f0, 16($sp)
++	epilogue
++
++E SW64_LD_DOUBLE
++	fldd	$f0, 16($sp)
++	epilogue
++
++E SW64_LD_CPLXF
++	flds	$f0, 16($sp)
++	flds	$f1, 20($sp)
++	epilogue
++
++E SW64_LD_CPLXD
++	fldd	$f0, 16($sp)
++	fldd	$f1, 24($sp)
++	epilogue
++
++	cfi_endproc
++	.end	ffi_closure_SYSV
++
++#if defined __SYSV__ && defined __linux__
++	.section	.note.GNU-stack,"",@progbits
++#endif
+--- libffi-3.4.2.orig/testsuite/libffi.complex/cls_complex_va_float.c
++++ libffi-3.4.2/testsuite/libffi.complex/cls_complex_va_float.c
+@@ -6,11 +6,11 @@
+ 
+ /* { dg-do run } */
+ 
+-/* Alpha splits _Complex into two arguments.  It's illegal to pass
++/* Alpha/Sunway splits _Complex into two arguments.  It's illegal to pass
+    float through varargs, so _Complex float goes badly.  In sort of
+    gets passed as _Complex double, but the compiler doesn't agree
+    with itself on this issue.  */
+-/* { dg-do run { xfail alpha*-*-* } } */
++/* { dg-do run { xfail alpha*-*-* sw64*-*-* sw_64*-*-* } } */
+ 
+ #include "complex_defs_float.inc"
+ #include "cls_complex_va.inc"
