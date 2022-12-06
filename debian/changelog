@@ -1,6 +1,6 @@
-libffi (3.4.2.1-1+dde) UNRELEASED; urgency=medium
+libffi (3.4.2.2-1+dde) UNRELEASED; urgency=medium
 
-  * update
+  * rebuild
 
  -- Debian GCC Maintainers <debian-gcc@lists.debian.org>  Wed, 27 Jul 2022 10:15:58 +0800
 
