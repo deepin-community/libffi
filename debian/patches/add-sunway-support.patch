@@ -4,17 +4,17 @@ Author: Miao Changwei <miaochangwei@uniontech.com>
 ---
 Last-Update: 2022-04-07
 
---- libffi-3.4.2.orig/Makefile.am
-+++ libffi-3.4.2/Makefile.am
-@@ -61,6 +61,7 @@ noinst_HEADERS = src/aarch64/ffitarget.h
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -62,6 +62,7 @@
  	src/s390/ffitarget.h src/s390/internal.h src/sh/ffitarget.h	\
  	src/sh64/ffitarget.h src/sparc/ffitarget.h			\
  	src/sparc/internal.h src/tile/ffitarget.h src/vax/ffitarget.h	\
 +	src/sw64/ffitarget.h src/sw64/internal.h			\
  	src/x86/ffitarget.h src/x86/internal.h src/x86/internal64.h	\
  	src/x86/asmnames.h src/xtensa/ffitarget.h src/dlmalloc.c	\
- 	src/kvx/ffitarget.h
-@@ -89,6 +90,7 @@ EXTRA_libffi_la_SOURCES = src/aarch64/ff
+ 	src/kvx/ffitarget.h src/kvx/asm.h				\
+@@ -91,6 +92,7 @@
  	src/s390/sysv.S src/sh/ffi.c src/sh/sysv.S src/sh64/ffi.c	\
  	src/sh64/sysv.S src/sparc/ffi.c src/sparc/ffi64.c		\
  	src/sparc/v8.S src/sparc/v9.S src/tile/ffi.c src/tile/tile.S	\
@@ -22,33 +22,20 @@ Last-Update: 2022-04-07
  	src/vax/ffi.c src/vax/elfbsd.S src/x86/ffi.c src/x86/sysv.S	\
  	src/x86/ffiw64.c src/x86/win64.S src/x86/ffi64.c		\
  	src/x86/unix64.S src/x86/sysv_intel.S src/x86/win64_intel.S	\
---- libffi-3.4.2.orig/config.guess
-+++ libffi-3.4.2/config.guess
-@@ -939,6 +939,10 @@ EOF
- 	if test "$?" = 0 ; then LIBC=gnulibc1 ; fi
- 	echo "$UNAME_MACHINE"-unknown-linux-"$LIBC"
- 	exit ;;
-+    sw_64:Linux:*:* | sw64:Linux:*:*)
-+	UNAME_MACHINE=sw_64
-+	echo "$UNAME_MACHINE"-unknown-linux-"$LIBC"
-+	exit ;;
-     arc:Linux:*:* | arceb:Linux:*:*)
- 	echo "$UNAME_MACHINE"-unknown-linux-"$LIBC"
- 	exit ;;
---- libffi-3.4.2.orig/config.sub
-+++ libffi-3.4.2/config.sub
-@@ -1239,7 +1239,7 @@ case $cpu-$vendor in
+--- a/config.sub
++++ b/config.sub
+@@ -1266,7 +1266,7 @@
  			| sparc | sparc64 | sparc64b | sparc64v | sparc86x | sparclet \
  			| sparclite \
  			| sparcv8 | sparcv9 | sparcv9b | sparcv9v | sv1 | sx* \
 -			| spu \
 +			| spu | sw_64 \
  			| tahoe \
+ 			| thumbv7* \
  			| tic30 | tic4x | tic54x | tic55x | tic6x | tic80 \
- 			| tron \
---- libffi-3.4.2.orig/configure.host
-+++ libffi-3.4.2/configure.host
-@@ -247,6 +247,13 @@ case "${host}" in
+--- a/configure.host
++++ b/configure.host
+@@ -254,6 +254,13 @@
  	SOURCES="ffi.c ffi64.c v8.S v9.S"
  	;;
  
@@ -63,7 +50,7 @@ Last-Update: 2022-04-07
          TARGET=TILE; TARGETDIR=tile
  	SOURCES="ffi.c tile.S"
 --- /dev/null
-+++ libffi-3.4.2/src/sw64/ffi.c
++++ b/src/sw64/ffi.c
 @@ -0,0 +1,517 @@
 +/* -----------------------------------------------------------------------
 +   ffi.c - Copyright (c) 2012  Anthony Green
@@ -583,7 +570,7 @@ Last-Update: 2022-04-07
 +  return (flags >> SW64_LD_SHIFT) & 0xff;
 +}
 --- /dev/null
-+++ libffi-3.4.2/src/sw64/ffitarget.h
++++ b/src/sw64/ffitarget.h
 @@ -0,0 +1,58 @@
 +/* -----------------------------------------------------------------*-C-*-
 +   ffitarget.h - Copyright (c) 2012  Anthony Green
@@ -644,7 +631,7 @@ Last-Update: 2022-04-07
 +
 +#endif
 --- /dev/null
-+++ libffi-3.4.2/src/sw64/internal.h
++++ b/src/sw64/internal.h
 @@ -0,0 +1,23 @@
 +#define SW64_ST_VOID	0
 +#define SW64_ST_INT	1
@@ -670,7 +657,7 @@ Last-Update: 2022-04-07
 +#define SW64_RET_IN_MEM	0x10000
 +#define SW64_FLAGS(S, L)	(((L) << SW64_LD_SHIFT) | (S))
 --- /dev/null
-+++ libffi-3.4.2/src/sw64/sysv.S
++++ b/src/sw64/sysv.S
 @@ -0,0 +1,283 @@
 +/* -----------------------------------------------------------------------
 +   sysv.S - Copyright (c) 1998, 2001, 2007, 2008, 2011, 2014 Red Hat
@@ -955,8 +942,8 @@ Last-Update: 2022-04-07
 +#if defined __SYSV__ && defined __linux__
 +	.section	.note.GNU-stack,"",@progbits
 +#endif
---- libffi-3.4.2.orig/testsuite/libffi.complex/cls_complex_va_float.c
-+++ libffi-3.4.2/testsuite/libffi.complex/cls_complex_va_float.c
+--- a/testsuite/libffi.complex/cls_complex_va_float.c
++++ b/testsuite/libffi.complex/cls_complex_va_float.c
 @@ -6,11 +6,11 @@
  
  /* { dg-do run } */
@@ -971,3 +958,16 @@ Last-Update: 2022-04-07
  
  #include "complex_defs_float.inc"
  #include "cls_complex_va.inc"
+--- a/config.guess
++++ b/config.guess
+@@ -990,6 +990,10 @@
+ 	if test "$?" = 0 ; then LIBC=gnulibc1 ; fi
+ 	GUESS=$UNAME_MACHINE-unknown-linux-$LIBC
+ 	;;
++    sw_64:Linux:*:* | sw64:Linux:*:*)
++	UNAME_MACHINE=sw_64
++	GUESS=$UNAME_MACHINE-unknown-linux-$LIBC
++	;;
+     arc:Linux:*:* | arceb:Linux:*:* | arc32:Linux:*:* | arc64:Linux:*:*)
+ 	GUESS=$UNAME_MACHINE-unknown-linux-$LIBC
+ 	;;
