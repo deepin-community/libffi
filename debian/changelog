@@ -1,14 +1,25 @@
-libffi (3.4.4-1deepin2) unstable; urgency=medium
+libffi (3.4.6-1) unstable; urgency=medium
 
-  * Add support for sunway. (Imported from 3.4.2.1-1+dde)
+  * New upstream version.
+    - Add support for wasm32.
+    - Add support for aarch64 branch target identification (bti).
+    - Add support for ARCv3: ARC32 & ARC64.
+    - Add support for HPPA64, and many HPPA fixes.
+    - Add support for Haikuos on PowerPC.
+    - Fixes for AIX, loongson, MIPS, power, sparc64, and x86 Darwin.
+  * Update copyright dates.
 
- -- Chang Yang <yangchang@deepin.org>  Wed, 08 Nov 2023 13:38:12 +0800
+ -- Matthias Klose <doko@debian.org>  Wed, 21 Feb 2024 23:25:21 +0100
 
-libffi (3.4.4-1deepin1) unstable; urgency=medium
+libffi (3.4.4-2) unstable; urgency=medium
 
-  * Fix loong64 symbol
+  * Update symbols file for loong64. Closes: #1024359.
+  * Apply patches for hppa. Closes: #1024492.
+  * Update symbols for mips64el.
+  * Update watch file.
+  * Bump standards version.
 
- -- Han Gao <gaohan@deepin.org>  Sat, 14 Jan 2023 04:23:32 +0800
+ -- Matthias Klose <doko@debian.org>  Sat, 25 Nov 2023 08:17:52 +0100
 
 libffi (3.4.4-1) unstable; urgency=medium
 
