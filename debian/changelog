@@ -1,3 +1,9 @@
+libffi (3.4.6-1deepin2) unstable; urgency=medium
+
+  * recompile with -fPIC
+
+ -- Chang Yang <yangchang@deepin.org>  Wed, 01 Jul 2026 09:42:06 +0800
+
 libffi (3.4.6-1deepin1) unstable; urgency=medium
 
   * feat: add sw64 support.
