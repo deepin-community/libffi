@@ -1,3 +1,10 @@
+libffi (3.4.8-2deepin1) unstable; urgency=medium
+
+  * Restore deepin-specific patches from master:
+    - Add sw_64 architecture support (0001-deepin-sw_64-support.diff)
+
+ -- lichenggang <lichenggang@uniontech.com>  Fri, 17 Jul 2026 00:00:00 +0800
+
 libffi (3.4.8-2) unstable; urgency=medium
 
   * Update from the trunk:
