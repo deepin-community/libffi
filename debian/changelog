@@ -1,3 +1,9 @@
+libffi (3.4.8-2deepin2) unstable; urgency=medium
+
+  * Rebuild with LTO enabled (dpkg vendor feature optimize/lto).
+
+ -- tunaichao <tunaichao@uniontech.com>  Thu, 10 Sep 2026 18:18:09 +0800
+
 libffi (3.4.8-2deepin1) unstable; urgency=medium
 
   * Restore deepin-specific patches from master:
